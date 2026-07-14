@@ -1,0 +1,26 @@
+{
+  "task_id": "std_demo_001",
+  "features": {
+    "ProbabilityCategory_of_order": 0.1,
+    "TotalNumberOfLengths_of_order": 3,
+    "VolumeProductBPI_CutSize_150_240_of_order": null,
+    "AluminumConsumption_of_order": 1.975,
+    "CopperConsumption_of_order": null,
+    "ProductionMonthNumber_of_order": 7,
+    "NumberCurrentMonth_of_order": 5,
+    "VolumeProductBPI_CutSize_0_10_of_order": null,
+    "VolumeProductBPI_CutSize_16_120_of_order": 2.029,
+    "VolumeProductPVH_CutSize_0_10_of_order": null,
+    "NumberDayCurrentMonth_of_order" : 31,
+    "CostCopperAccordingNomenclatureCopperWireRod_of_order": null,
+    "VolumeProductPVH_CutSize_150_240_of_order": null,
+    "VolumeProductAluminumRolling_of_order": null,
+    "VolumeProductCopperRolling_of_order": null,
+    "VolumeProductPVH_CutSize_16_120_of_order": null,
+    "TotalMarginIncome_of_order": -0.039,
+    "NumberPlannedMonthExecution_of_order": 2.0,
+    "PercentageConfidenceDirector_of_order": 100,
+    "NumberPlannedDayMonthExecution_of_order": 23.0,
+    "TotalPrice_of_order": 1.923
+  }
+}
