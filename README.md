@@ -1,1 +1,234 @@
-# Request-Preprocessing
+# Система приоритезации клиентских заявок
+
+Репозиторий системы ранжирования (приоритезации) клиентских заявок по заказу **ООО «Москабельмет»**.
+
+Заявки поступают через HTTP API, проходят через очередь Kafka, обрабатываются ML-моделью (CatBoost), а результат записывается в MongoDB. Человек-оператор может просматривать обработанные заявки, отсортированные по приоритету, и отмечать их как выполненные.
+
+---
+
+## Архитектура
+
+```
+┌──────────────┐     POST /rank_standard     ┌──────────────┐     Kafka     ┌──────────────┐
+│   Клиент     │ ──────────────────────────►  │   Backend    │ ────────────► │   Worker     │
+│  (curl/API)  │                              │  (FastAPI)   │              │  (Kafka)     │
+└──────────────┘                              └──────┬───────┘              └──────┬───────┘
+                                                      │                           │
+                                                      │ сохраняет                  │ пишет ml_rank
+                                                      ▼                           ▼
+                                                  ┌──────────────────────────────────┐
+                                                  │           MongoDB               │
+                                                  │   коллекция: tasks              │
+                                                  │   {_id, external_id, data,      │
+                                                  │    ml_rank, status, ...}        │
+                                                  └──────────────────────────────────┘
+```
+
+**Компоненты:**
+
+| Компонент | Технология | Назначение |
+|-----------|-----------|------------|
+| Backend | FastAPI + uvicorn | HTTP API для приёма заявок |
+| Worker | Python asyncio + aiokafka | Чтение задач из Kafka, вызов ML |
+| ML | CatBoost | Предсказание ранга приоритета заявки |
+| Очередь | Apache Kafka (KRaft) | Буферизация и асинхронная обработка |
+| БД | MongoDB | Хранение задач и результатов |
+
+---
+
+## Жизненный цикл задачи
+
+1. **Клиент** отправляет POST-запрос с признаками заявки на `/rank_standard`
+2. **Backend** сохраняет задачу в MongoDB со статусом `pending` и публикует сообщение в Kafka
+3. **Worker** читает сообщение из Kafka, меняет статус на `processing`, запускает ML-модель
+4. **ML-модель** (CatBoost) вычисляет ранг приоритета заявки (0 — низкий, 3 — высокий)
+5. **Worker** записывает в MongoDB: `ml_rank`, статус `"Ожидает"`, служебные поля
+6. **Оператор** (через API или внешнюю систему) просматривает заявки и отмечает выполненные через `PATCH /tasks/{id}/complete`
+
+---
+
+## Структура проекта
+
+```
+├── main.py                        # Точка входа: запуск backend + worker
+├── .env.example                   # Шаблон переменных окружения
+├── requirements.txt               # Python-зависимости
+├── docker-compose.yml             # Инфраструктура (MongoDB, Kafka, backend)
+├── Dockerfile                     # Контейнер для backend
+│
+├── backend/                       # Backend-часть (FastAPI)
+│   ├── __init__.py
+│   ├── app.py                     # FastAPI-приложение, роуты
+│   ├── config.py                  # Конфигурация (переменные окружения)
+│   ├── models.py                  # Pydantic-модели (запросы, ответы)
+│   ├── classification.py          # Абстракция классификатора, fake_process
+│   └── worker.py                  # Kafka-consumer, цикл обработки задач
+│
+├── ml/                            # ML-часть
+│   ├── model.py                   # Класс-обёртка Ranker
+│   ├── ranker.ipynb               # Jupyter-ноутбук с обучением модели
+│   ├── data/                      # Данные: Excel-файлы, веса модели (.cbm)
+│   ├── fitting/                   # Скрипты обучения моделей
+│   ├── ranker_scripts/            # Скрипты для инференса ранкера
+│   └── usage/                     # Примеры использования
+│
+└── scripts/                       # Вспомогательные скрипты
+    ├── send_standard_request.bat  # Отправка тестового запроса
+    ├── payloads/
+    │   └── standard_request.json  # Пример тела запроса с признаками
+    ├── test_runner.py             # Функциональные и нагрузочные тесты (Python)
+    └── run_tests.bat              # Обёртка для запуска тестов
+```
+
+---
+
+## Быстрый старт
+
+### 1. Поднять инфраструктуру (MongoDB + Kafka)
+
+```powershell
+docker compose up -d mongo kafka
+```
+
+### 2. Установить зависимости
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+Copy-Item .env.example .env
+```
+
+### 3. Запустить backend
+
+```powershell
+python main.py
+```
+
+API будет доступен на `http://localhost:8000`, Swagger-документация — `http://localhost:8000/docs`.
+
+### 4. Отправить тестовый запрос
+
+```powershell
+scripts\send_standard_request.bat
+```
+
+### 5. Запустить тесты
+
+```powershell
+scripts\run_tests.bat
+```
+
+---
+
+## API-эндпоинты
+
+| Метод | Путь | Описание |
+|-------|------|----------|
+| `GET` | `/health` | Проверка работоспособности |
+| `POST` | `/rank_standard` | Создать задачу на ранжирование |
+| `GET` | `/tasks` | Список всех задач (до 100) |
+| `GET` | `/tasks/{id}` | Получить задачу по ID |
+| `PATCH` | `/tasks/{id}/ml-result` | Вручную записать ML-результат |
+| `PATCH` | `/tasks/{id}/complete` | Завершить задачу (статус «Готово») |
+
+Подробнее — в `backend/README.md`.
+
+---
+
+## ML-модель
+
+Система использует **CatBoostRegressor** для предсказания ранга приоритета заявки.
+
+- **Входные признаки**: характеристики заявки (вероятность категории, количества, цены, объёмы продукции и т.д.)
+- **Целевая переменная**: ранг приоритета, перекодированный в 4 класса:
+  - `0` — низкий (исходная оценка ≤ 5)
+  - `1` — ниже среднего (исходная оценка = 6)
+  - `2` — средний (исходная оценка = 7)
+  - `3` — высокий (исходная оценка ≥ 8)
+- **Модель** обучается в Jupyter-ноутбуке `ml/ranker.ipynb`
+
+Подробнее — в `ml/README.md`.
+
+---
+
+## Тестирование
+
+### Функциональные тесты (`scripts/test_runner.py`)
+
+Скрипт запускает 4 теста:
+
+1. **API доступен** — проверка `GET /health`
+2. **Стандартный запрос** — отправка одной задачи, проверка создания
+3. **Список задач** — проверка `GET /tasks`
+4. **Нагрузка 100 запросов** — отправка 100 задач параллельно, ожидание обработки, проверка статусов
+
+Запуск:
+
+```powershell
+python scripts/test_runner.py
+```
+
+или через батник:
+
+```powershell
+scripts\run_tests.bat
+```
+
+### Переменная окружения
+
+`API_URL` — базовый URL API (по умолчанию `http://localhost:8000`).
+
+---
+
+## Конфигурация
+
+Все настройки задаются через переменные окружения (см. `.env.example`):
+
+| Переменная | Описание | По умолчанию |
+|-----------|----------|-------------|
+| `MONGO_URI` | Строка подключения MongoDB | `mongodb://localhost:27017` |
+| `MONGO_DB` | Имя БД | `ranking_db` |
+| `KAFKA_BOOTSTRAP_SERVERS` | Адрес Kafka | `localhost:9092` |
+| `KAFKA_TOPIC` / `KAFKA_REQUEST_TOPIC` | Топик для задач | `requests.created` |
+| `KAFKA_CONSUMER_GROUP` | Группа потребителей | `request-ranking-backend` |
+| `APP_HOST` | Хост FastAPI | `0.0.0.0` |
+| `APP_PORT` | Порт FastAPI | `8000` |
+
+---
+
+## Docker
+
+Для запуска всей системы в контейнерах:
+
+```powershell
+docker compose up -d
+```
+
+Сервисы:
+- `mongo` — MongoDB (порт 27017)
+- `kafka` — Kafka в режиме KRaft (порт 9092)
+- `backend` — FastAPI + worker (порт 8000)
+
+---
+
+## Разработка
+
+### Добавление своей ML-функции
+
+```python
+from main import start_backend
+from backend.models import TaskMessage
+
+async def my_classifier(task: TaskMessage):
+    # Ваша логика ранжирования
+    return {"rank": 0.91, "details": {"model": "custom"}}
+
+start_backend(classify_fn=my_classifier)
+```
+
+### Запуск только worker'а (без API)
+
+```python
+from main import start_processing_worker
+start_processing_worker()
